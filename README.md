@@ -320,7 +320,7 @@ Win10 默认会把新图标收进「^」溢出区。拖到任务栏常显即可�
 
 ## 素材来源
 
-界面插画 `assets/whale.png` 来自开源项目 **dsh-whale-widget**（DSH 余额小挂件）：
+界面插画 `assets/whale.png` 来自开源项目 **dsh-whale-widget**（DSH 余额小挂件）感谢您的素材！：
 
 | 项目 | 信息 |
 | --- | --- |
