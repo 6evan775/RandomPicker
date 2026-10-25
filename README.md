@@ -1,11 +1,14 @@
 # 随机点名 · RandomPicker
 
-> 一个贴在屏幕右边缘的小家伙。点一下，它变成长方形卡片，滚一滚，叫出一个人名。
+> 一个贴在屏幕右边缘的小家伙。点一下，小鲸鱼从气泡里叫你抽一个人。
 
-纯 **C++ / Win32 API** 手写，不依赖任何 GUI 框架，不需要运行库，单个 exe 拷到 U 盘就能走。
-白色 + 蓝色扁平化设计，常驻托盘，可开机自启，抽谁完全随机且不会连着重复。
+纯 **C++ / Win32 API + GDI+** 手写，不依赖任何 GUI 框架，不需要运行库，整个文件夹拷到 U 盘就能走。
+待机是一枚蓝色椭圆胶囊，展开后是「小鲸鱼 + 气泡」插画，姓名和「点名」按钮都画在气泡里。
+常驻托盘，可开机自启，抽谁完全随机且不会连着重复。
 
 作者：**6evan775（名名）** · [GitHub](https://github.com/6evan775) · [MIT License](LICENSE)
+
+当前版本：**v1.0.0**
 
 ![卡片展开状态](预览-卡片.png)
 
@@ -17,11 +20,12 @@
 
 | 待机 | 展开 |
 | --- | --- |
-| 屏幕右边缘一枚蓝色椭圆胶囊，里面是白色人形图标，带呼吸光圈，可上下拖动 | 白色圆角卡片：蓝色标题「随机点名」、大号姓名、蓝色「点名」按钮 |
+| 屏幕右边缘一枚蓝色椭圆胶囊，里面是白色人形图标，带呼吸光圈，可上下拖动 | 小鲸鱼插画：气泡内是大号姓名 + 蓝色「点名」按钮，气泡外是人物本体 |
 
 - 鼠标移上去，图标轻微放大、椭圆变亮；
-- 点击后有一小段 **弹出动画**：胶囊形变成卡片、从小放大、淡入，同时「啵」一声；
-- 收起时反向缩回胶囊，配一声下滑音。
+- 点击后有一小段 **弹出动画**：胶囊从小放大、淡入成插画，同时「啵」一声；
+- **点人物本体（气泡以外的角色）即可收起**，配一声下滑音；
+- 整窗是逐像素 Alpha 分层窗口，插画边缘平滑，没有白边或灰边。
 
 ---
 
@@ -38,6 +42,13 @@
 - 贴在屏幕右边缘（自动避开任务栏），**按住可上下拖动**，松手后位置写进 `settings.ini`，下次启动还在那儿。
 - 拖动时不会误触发展开；只有「按下-松开没移动」才算点击。
 - 呼吸光圈每 2.2 秒一轮，存在感很低但一眼能找到。
+
+### 展开卡片
+- 整窗是一张「小鲸鱼 + 气泡」插画，气泡里只放**姓名**和**点名按钮**两样东西，干净不抢戏。
+- **点人物本体（气泡以外的区域）收起**，点气泡空白不会误收起。
+- 气泡空白处按住可以**拖动窗口**，拖完不会误触发收起。
+- 卡片边长 340（96 DPI 基准），比早期版本更小；屏幕不够大时自动收缩，不会出屏。
+- 名字过长自动缩字号，再放不下加省略号。
 
 ### 托盘
 - 常驻系统托盘，图标是蓝底白人形。
@@ -61,9 +72,10 @@
 
 ## 快速开始
 
-1. 把 `RandomPicker.exe`、`names.txt`、`settings.ini` 放在**同一个文件夹**。
+1. 把整个文件夹（`RandomPicker.exe`、`names.txt`、`settings.ini`、`assets\whale.png`）拷到一起。
 2. 双击 `RandomPicker.exe`。
-3. 屏幕右边缘出现蓝色椭圆 → 点它 → 卡片弹出 → 点「点名」。
+3. 屏幕右边缘出现蓝色椭圆 → 点它 → 小鲸鱼弹出 → 点「点名」。
+4. 想收起：点小鲸鱼本体（气泡外面）。
 
 > 首次运行如果缺 `names.txt`，程序会自动生成一份 8 人示例并提示你去改。
 > 缺 `settings.ini` 也会自动生成带注释的默认配置。
@@ -72,13 +84,19 @@
 
 ```
 RandomPicker/
-├─ RandomPicker.exe    主程序（单文件，无依赖）
+├─ RandomPicker.exe    主程序
 ├─ RandomPicker.cpp    源码
+├─ assets/
+│   └─ whale.png       界面插画（小鲸鱼 + 气泡）
 ├─ names.txt           名单，每行一个姓名
 ├─ settings.ini        配置（音效/音量/自启/待机位置/动画时长）
 ├─ README.md           本文件
+├─ PROVENANCE.md       素材来源声明
 └─ LICENSE             开源协议
 ```
+
+> **`assets\whale.png` 不能少**：它是展开后的整个界面。缺失时程序仍能点名，
+> 但卡片会退化成纯色背景，并在启动时弹一次提示。
 
 ---
 
@@ -148,8 +166,8 @@ anim_ms=260    ; 弹出动画时长（毫秒），80~1500
 | 左键点待机椭圆 | 展开卡片 |
 | 按住待机椭圆上下拖 | 移动待机位置（自动记忆） |
 | 左键点「点名」 | 开始滚动抽取 |
-| 卡片空白处按住拖 | 移动卡片 |
-| 点右上角「收起」 | 收回右边缘 |
+| 气泡空白处按住拖 | 移动卡片 |
+| **点人物本体（气泡外）** | 收回右边缘 |
 | `Esc` | 收起卡片 |
 | 右键（卡片或托盘） | 弹出菜单 |
 | 托盘左键 | 展开 / 收起 |
@@ -164,25 +182,29 @@ anim_ms=260    ; 弹出动画时长（毫秒），80~1500
 ```bat
 g++ RandomPicker.cpp -o RandomPicker.exe -std=c++11 -O2 -mwindows ^
     -static -static-libgcc -static-libstdc++ ^
-    -lgdi32 -luser32 -lshell32 -ladvapi32 -lwinmm -lmsimg32
+    -lgdiplus -lgdi32 -luser32 -lshell32 -ladvapi32 -lwinmm
 ```
 
 - `-mwindows`：GUI 子系统，不弹黑框控制台。
 - `-static*`：运行时静态链接，exe 拷到没装编译器的电脑也能跑。
-- 想更小：把 `-O2` 换成 `-Os` 并加 `-s`（去符号表，约 550 KB）。
+- `-lgdiplus`：v1.0.0 起界面改用 GDI+ 逐像素 Alpha 绘制，**必须**加这个库。
+- 想更小：把 `-O2` 换成 `-Os` 并加 `-s`（去符号表）。
+
+> MinGW 下 `gdiplus.h` 需要先 `#include <objidl.h>`，否则会报 `PROPID does not name a type`。
+> 源码里已经处理好了，自己改代码时别把这两行的顺序调换。
 
 ### Dev-C++ 图形界面
 
 1. `文件 → 新建 → 项目 → Windows Application`，语言 C++。
 2. 把 `RandomPicker.cpp` 全部内容粘进 `main.cpp`。
-3. `项目 → 项目属性 → 参数 → 链接器` 加：`-lgdi32 -luser32 -lshell32 -ladvapi32 -lwinmm -lmsimg32`。
+3. `项目 → 项目属性 → 参数 → 链接器` 加：`-lgdiplus -lgdi32 -luser32 -lshell32 -ladvapi32 -lwinmm`。
 4. F11 编译运行。
 
 ### MSVC
 
 ```bat
 cl /nologo /utf-8 /std:c++14 /O2 /EHsc /DUNICODE /D_UNICODE RandomPicker.cpp ^
-   /link /SUBSYSTEM:WINDOWS user32.lib gdi32.lib advapi32.lib shell32.lib winmm.lib msimg32.lib
+   /link /SUBSYSTEM:WINDOWS user32.lib gdi32.lib advapi32.lib shell32.lib winmm.lib gdiplus.lib
 ```
 
 > 源码里已写 `#pragma comment(lib, ...)`，MSVC 下 lib 不写也能链接。
@@ -204,12 +226,16 @@ cl /nologo /utf-8 /std:c++14 /O2 /EHsc /DUNICODE /D_UNICODE RandomPicker.cpp ^
 #define DOCK_ICON_RATIO     0.62   // 人物图标占比
 #define DOCK_BREATH_MS      2200   // 呼吸周期
 
-// 卡片
-#define CARD_WIDTH          320    // 卡片宽
-#define CARD_HEIGHT         320    // 卡片高（=宽 即正方形）
-#define CARD_RADIUS         14     // 圆角
-#define CARD_PADDING        20     // 内边距
-#define CARD_BUTTON_HEIGHT  48     // 按钮高
+// 展开卡片（整张就是插画，正方形）
+#define CARD_WIDTH          340    // 边长，越大越占地方
+#define CARD_RIGHT_MARGIN   24     // 距屏幕右边缘
+
+// 气泡里元素的位置（以气泡半轴为单位，改尺寸时自动等比）
+#define BUBBLE_NAME_DY0     (-0.60)
+#define BUBBLE_NAME_DY1     0.02
+#define BUBBLE_BUTTON_DY0   0.16
+#define BUBBLE_BUTTON_DY1   0.58
+#define NAME_FONT_RATIO     0.62   // 姓名字号 = 气泡半轴 × 该值
 
 // 配色
 #define COLOR_BLUE          RGB(0x1A, 0x73, 0xE8)
@@ -275,16 +301,39 @@ Win10 默认会把新图标收进「^」溢出区。拖到任务栏常显即可�
 | 模块 | 做法 |
 | --- | --- |
 | 无边框浮窗 | `WS_POPUP` + `WS_EX_TOPMOST` + `WS_EX_TOOLWINDOW` + `WS_EX_LAYERED` |
-| 椭圆 / 圆角 | `SetWindowRgn` + `CreateEllipticRgn` / `CreateRoundRectRgn` |
-| 形变动画 | 每 15ms 插值窗口矩形 + 圆角半径 + 透明度；缓动用 `EaseOutBack` / `EaseInCubic` |
-| 内容缩放 | 动画期间把卡片渲染到全尺寸位图，等比 `StretchBlt` 居中，避免变形 |
-| 人物图标 | 4×4 超采样算覆盖率 → 预乘 Alpha 的 32 位 DIB → `AlphaBlend` |
-| 托盘图标 | 同样算法软件光栅出 32×32 带 Alpha 位图 → `CreateIconIndirect` |
+| 逐像素透明 | `UpdateLayeredWindow` + 32bpp 预乘 Alpha DIB，整窗内容由 GDI+ 绘制（GDI 的 `Ellipse`/`FillRect` 不写 Alpha，做不出平滑边缘） |
+| 插画缩放 | `Gdiplus::Bitmap` 高质量双三次缩放，按窗口尺寸缓存，尺寸变了才重建 |
+| 气泡定位 | 气泡在插画中的归一化坐标写死为宏（实测自原图），气泡内元素按半轴比例换算 |
+| 形变动画 | 每 15ms 插值窗口矩形 + 透明度；缓动用 `EaseOutBack` / `EaseInCubic` |
+| 内容缩放 | 动画期间把卡片渲染到全尺寸位图，等比缩放居中，避免变形 |
+| 待机图标 | GDI+ 画椭圆渐变 + 头肩简笔画，呼吸光圈按 `GetTickCount64` 相位驱动 |
+| 托盘图标 | 4×4 超采样软件光栅出 32×32 带 Alpha 位图 → `CreateIconIndirect` |
 | 音效 | `waveOut` + 回调，实时合成正弦/三角/噪声 + 指数包络，16 声道复用 |
-| 双缓冲 | 内存 DC + `BitBlt`，滚动不闪 |
 | 名单编码 | 先按 UTF-8 严格解码，失败回落 `CP_ACP` |
 
-依赖：`kernel32 / user32 / gdi32 / advapi32 / shell32 / winmm / msimg32`，全部系统自带。
+依赖：`kernel32 / user32 / gdi32 / gdiplus / advapi32 / shell32 / winmm`，全部系统自带。
+
+> **为什么不给窗口加 `CS_DROPSHADOW`**：分层窗口上系统会自己补一层不透明阴影，
+> 在浅色背景上看起来就是一条灰黑色的硬边。v1.0.0 已去掉，改由插画自身的描边提供轮廓。
+
+---
+
+## 素材来源
+
+界面插画 `assets/whale.png` 来自开源项目 **dsh-whale-widget**（DSH 余额小挂件）：
+
+| 项目 | 信息 |
+| --- | --- |
+| 原文件 | `assets/DSniang02.png`（1026×1026，带气泡的整图） |
+| 作者 | **MeteorNOX** |
+| 仓库 | <https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget> |
+| 协议 | MIT License |
+
+**特别感谢 MeteorNOX 创作并开源了这只小鲸鱼**，本项目的展开界面直接使用这张插画，
+姓名与「点名」按钮按气泡位置叠加绘制。原图版权归原作者所有，遵循 MIT 协议使用。
+
+本项目的 MIT 协议**不覆盖**该插画——它仍归原作者。若你需要商用或再分发，
+请保留上方署名与仓库链接，具体以原仓库 LICENSE 为准。详见 [PROVENANCE.md](PROVENANCE.md)。
 
 ---
 

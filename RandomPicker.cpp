@@ -1,25 +1,31 @@
 // ============================================================================
-//  随机点名 · Windows 原生悬浮窗程序  v2.0
+//  随机点名 · Windows 原生悬浮窗程序  v1.0.0
 //  ----------------------------------------------------------------------------
 //  作者：6evan775（名名）   https://github.com/6evan775
 //  协议：MIT License
 //  ----------------------------------------------------------------------------
-//  · 纯 Win32 API + C++11，不依赖任何第三方 GUI 框架
+//  · 纯 Win32 API + C++11 + GDI+，不依赖任何第三方 GUI 框架
 //  · MinGW-w64 (g++) 与 MSVC (cl) 均可直接编译
-//  · 白 + 蓝扁平化配色；无边框、始终置顶、不占任务栏、托盘常驻
 //  · 待机：右边缘一枚蓝色椭圆胶囊 + 人物简笔画图标，可上下拖动
-//  · 展开：带缓动 + 淡入的弹出动画；收起：反向收回椭圆
+//  · 展开：整窗是一张「小鲸鱼 + 气泡」插画（assets/whale.png），
+//          姓名 / 点名按钮绘制在气泡内部；点人物本体（气泡外）收起
+//  · 逐像素 Alpha 分层窗口（UpdateLayeredWindow），插画边缘平滑无白边
 //  · 读取同目录 names.txt，滚动约 1 秒后减速定格（带音效）
 //  · 排除最近 2 次抽取结果，名单人数 <= 2 时自动解除限制
 //  · 配置全部放在同目录 settings.ini（含开机自启开关）
 //
+//  美术素材：assets/whale.png 取自 dsh-whale-widget 插件，作者 MeteorNOX，
+//            详见 PROVENANCE.md 与 README「素材来源」一节。
+//
 //  编译（MinGW / Dev-C++ 自带 g++）：
 //    g++ RandomPicker.cpp -o RandomPicker.exe -std=c++11 -O2 -mwindows -static
-//        -static-libgcc -static-libstdc++ -lgdi32 -luser32 -lshell32 -ladvapi32 -lwinmm
+//        -static-libgcc -static-libstdc++ -lgdiplus -lgdi32 -luser32
+//        -lshell32 -ladvapi32 -lwinmm
 //
 //  编译（MSVC 开发者命令提示符）：
 //    cl /nologo /utf-8 /std:c++14 /O2 /EHsc /DUNICODE /D_UNICODE RandomPicker.cpp
-//       /link /SUBSYSTEM:WINDOWS user32.lib gdi32.lib advapi32.lib shell32.lib winmm.lib
+//       /link /SUBSYSTEM:WINDOWS user32.lib gdi32.lib advapi32.lib shell32.lib
+//       winmm.lib gdiplus.lib
 //
 //  ----------------------------------------------------------------------------
 //  AI 使用声明
@@ -53,6 +59,8 @@
 #include <windowsx.h>
 #include <shellapi.h>
 #include <mmsystem.h>
+#include <objidl.h>        // GDI+ 在 MinGW 下需要先声明 PROPID
+#include <gdiplus.h>
 
 #include <string>
 #include <vector>
@@ -70,6 +78,7 @@
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "winmm.lib")
 #pragma comment(lib, "msimg32.lib")
+#pragma comment(lib, "gdiplus.lib")
 #endif
 
 // ============================================================================
@@ -84,40 +93,54 @@
 #define DOCK_ICON_RATIO         0.62   // 人物图标占椭圆宽度的比例
 #define DOCK_BREATH_MS          2200   // 待机呼吸动画周期（毫秒）
 
-// ---------------------------- 展开后的卡片 --------------------------------
-#define CARD_WIDTH              320    // 卡片宽度
-#define CARD_HEIGHT             320    // 卡片高度（与宽度相同即为方形）
-#define CARD_RADIUS             14     // 卡片圆角半径
-#define CARD_PADDING            20     // 卡片四周内边距
-#define CARD_TITLE_HEIGHT       36     // 标题行高度
-#define CARD_TITLE_GAP          10     // 标题与姓名区之间的间距
-#define CARD_COLLAPSE_WIDTH     52     // 右上角「收起」热区宽度
-#define CARD_COLLAPSE_HEIGHT    26     // 右上角「收起」热区高度
-#define CARD_BUTTON_HEIGHT      48     // 底部「点名」按钮高度
-#define CARD_BUTTON_GAP         14     // 姓名区与按钮之间的间距
-#define CARD_BUTTON_RADIUS      10     // 「点名」按钮圆角半径
+// ---------------------------- 展开后的卡片（小鲸鱼插画） --------------------
+// 整张卡片就是 assets/whale.png 这张插画：姓名 + 「点名」按钮画在气泡里，
+// 点人物本体（气泡外的角色）即可收起。窗口是正方形，插画按窗口等比铺满。
+#define CARD_WIDTH              340    // 卡片边长（96 DPI 基准；越大越占地方）
 #define CARD_RIGHT_MARGIN       24     // 展开时卡片右侧与屏幕右边缘的距离
+
+// 气泡在插画中的归一化位置（实测自 DSniang02.png，原图 1026x1026）
+// 气泡外框 x 94..813、y 32..471，中心 (453.5, 251.5)
+#define BUBBLE_NX0              0.0916 // 气泡左边缘 / 图宽
+#define BUBBLE_NX1              0.7924 // 气泡右边缘 / 图宽
+#define BUBBLE_NY0              0.0312 // 气泡上边缘 / 图高
+#define BUBBLE_NY1              0.4591 // 气泡下边缘 / 图高
+
+// 气泡内部的排版（以气泡半轴为单位）
+// 气泡里只放「姓名」和「点名」按钮两样东西，上下留白由椭圆边界决定。
+#define BUBBLE_NAME_DY0         (-0.60) // 姓名区上边
+#define BUBBLE_NAME_DY1         0.02    // 姓名区下边
+#define BUBBLE_BUTTON_DY0       0.16    // 按钮上边
+#define BUBBLE_BUTTON_DY1       0.58    // 按钮下边
+#define BUBBLE_BUTTON_WFACTOR   1.16    // 按钮宽度 = 半轴 × 该系数
+#define BUBBLE_TEXT_WFACTOR     1.48    // 姓名可用宽度 = 半轴 × 该系数
+#define BUBBLE_FILL_INSET       0.965   // 白色内填的椭圆缩放（留出描边）
+
+// 字号按气泡半轴等比缩放，这样改卡片尺寸/DPI 时排版不会错位
+#define NAME_FONT_RATIO         0.62    // 姓名字号 = 气泡半轴 × 该系数
+#define BUTTON_FONT_RATIO       0.27    // 按钮字号 = 气泡半轴 × 该系数
+#define HINT_FONT_RATIO         0.26    // 提示文字字号 = 气泡半轴 × 该系数
+
+#define WHALE_ASSET_DIR         L"assets"
+#define WHALE_ASSET_NAME        L"whale.png"
 
 // ---------------------------- 字体（像素） ----------------------------------
 #define FONT_FACE               L"Microsoft YaHei UI"   // 缺失时系统自动替换
-#define FONT_SIZE_TITLE         19     // 标题「随机点名」
-#define FONT_SIZE_NAME          42     // 姓名主字号
-#define FONT_SIZE_NAME_MIN      16     // 姓名自动缩小的下限
-#define FONT_SIZE_NAME_HINT     16     // 提示文字字号
-#define FONT_SIZE_BUTTON        18     // 按钮文字
-#define FONT_SIZE_COLLAPSE      13     // 「收起」文字
+#define FONT_SIZE_NAME_MIN      14     // 姓名自动缩小的下限（96 DPI 基准）
 
-// ---------------------------- 配色（白 + 蓝） -------------------------------
+// ---------------------------- 配色（取自插画） -------------------------------
 #define COLOR_BLUE              RGB(0x1A, 0x73, 0xE8)   // 主蓝
 #define COLOR_BLUE_HOVER        RGB(0x17, 0x66, 0xD0)   // 悬停蓝
 #define COLOR_BLUE_DARK         RGB(0x11, 0x53, 0xAE)   // 按下蓝
 #define COLOR_BLUE_LIGHT        RGB(0x4A, 0x9B, 0xF5)   // 高光蓝
 #define COLOR_BLUE_SOFT         RGB(0xE8, 0xF1, 0xFD)   // 浅蓝底
 #define COLOR_BLUE_DISABLED     RGB(0x9E, 0xC3, 0xF2)   // 滚动中按钮
-#define COLOR_CARD_BG           RGB(0xFF, 0xFF, 0xFF)   // 卡片纯白
+#define COLOR_CARD_BG           RGB(0xFF, 0xFF, 0xFF)   // 气泡内白色
+#define COLOR_INK               RGB(0x27, 0x2C, 0x5B)   // 插画描边墨蓝 (39,44,91)
+#define COLOR_INK_SOFT          RGB(0x41, 0x49, 0x5F)   // 气泡描边 (65,73,95)
 #define COLOR_TEXT_MAIN         RGB(0x22, 0x26, 0x2E)   // 姓名正文
 #define COLOR_TEXT_SUB          RGB(0x8A, 0x92, 0x9E)   // 次要文字
-#define COLOR_DIVIDER           RGB(0xEC, 0xF0, 0xF5)   // 分隔线
+#define COLOR_DIVIDER           RGB(0xE3, 0xE8, 0xF0)   // 分隔线
 #define COLOR_BUTTON_TEXT       RGB(0xFF, 0xFF, 0xFF)   // 按钮文字
 
 // ---------------------------- 点名行为 -------------------------------------
@@ -176,10 +199,11 @@ struct Settings
 
 struct CardLayout
 {
-    RECT title;
-    RECT collapse;
     RECT name;
     RECT button;
+    RECT bubble;      // 气泡外接矩形
+    int  bubbleRx;    // 气泡水平半轴
+    int  bubbleRy;    // 气泡垂直半轴
 };
 
 enum AnimKind
@@ -208,11 +232,8 @@ static HINSTANCE g_hInst = NULL;
 static HWND      g_hWnd  = NULL;
 static int       g_dpi   = 96;
 
-// 字体缓存
-static HFONT g_fontTitle    = NULL;
+// 字体缓存（用于文字宽高测量）
 static HFONT g_fontHint     = NULL;
-static HFONT g_fontButton   = NULL;
-static HFONT g_fontCollapse = NULL;
 
 // 光标
 static HCURSOR g_curHand    = NULL;
@@ -237,8 +258,7 @@ static bool g_dockHover    = false;
 static bool g_dockPressed  = false;
 static bool g_buttonHover  = false;
 static bool g_buttonDown   = false;
-static bool g_collapseHover= false;
-static bool g_collapseDown = false;
+static bool g_bodyHover    = false;   // 悬停在气泡外的人物本体上
 static bool g_cardDragging = false;
 static bool g_cardMoved    = false;
 static bool g_dockDragging = false;
@@ -271,6 +291,23 @@ static UINT            g_taskbarCreatedMsg = 0;
 
 // 随机数
 static std::mt19937 g_rng;
+
+// GDI+ 与插画
+static ULONG_PTR              g_gdiplusToken = 0;
+static Gdiplus::Bitmap*       g_whaleBitmap  = NULL;   // 原始插画
+static Gdiplus::Bitmap*       g_whaleScaled  = NULL;   // 按当前窗口缩放后的版本
+static int                    g_whaleScaledW = 0;
+static int                    g_whaleScaledH = 0;
+static std::wstring           g_whalePath;
+static bool                   g_whaleMissing = false;
+
+// 逐像素 Alpha 分层窗口的离屏缓冲
+static HDC     g_memDC     = NULL;
+static HBITMAP g_memBmp    = NULL;
+static HGDIOBJ g_memOldBmp = NULL;
+static int     g_memW      = 0;
+static int     g_memH      = 0;
+
 
 // ============================================================================
 //  三、通用工具
@@ -327,28 +364,6 @@ static RECT WorkAreaRect()
     return rc;
 }
 
-static void FillRoundRect(HDC dc, const RECT& rc, int radius, COLORREF color)
-{
-    HBRUSH brush = CreateSolidBrush(color);
-    HGDIOBJ oldBrush = SelectObject(dc, brush);
-    HGDIOBJ oldPen   = SelectObject(dc, GetStockObject(NULL_PEN));
-    RoundRect(dc, rc.left, rc.top, rc.right, rc.bottom, radius * 2, radius * 2);
-    SelectObject(dc, oldPen);
-    SelectObject(dc, oldBrush);
-    DeleteObject(brush);
-}
-
-static void FrameRoundRect(HDC dc, const RECT& rc, int radius, COLORREF color)
-{
-    HPEN pen = CreatePen(PS_SOLID, 1, color);
-    HGDIOBJ oldPen   = SelectObject(dc, pen);
-    HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
-    RoundRect(dc, rc.left, rc.top, rc.right, rc.bottom, radius * 2, radius * 2);
-    SelectObject(dc, oldBrush);
-    SelectObject(dc, oldPen);
-    DeleteObject(pen);
-}
-
 static HFONT MakeFont(int sizePx, int weight, const wchar_t* face)
 {
     if (sizePx < 1)
@@ -396,398 +411,384 @@ static int FitFontPx(HDC dc, const std::wstring& text, int maxWidth, int startPx
 //  四、布局
 // ============================================================================
 
+// 气泡在给定窗口尺寸下的外接矩形与半轴
+static void BubbleGeometry(int w, int h, RECT& out, int& rx, int& ry)
+{
+    out.left   = (LONG)(w * BUBBLE_NX0);
+    out.right  = (LONG)(w * BUBBLE_NX1);
+    out.top    = (LONG)(h * BUBBLE_NY0);
+    out.bottom = (LONG)(h * BUBBLE_NY1);
+
+    rx = (out.right - out.left) / 2;
+    ry = (out.bottom - out.top) / 2;
+    if (rx < 8) rx = 8;
+    if (ry < 8) ry = 8;
+}
+
+// 所有可交互元素都排在气泡内部，气泡中心为原点、以水平半轴 rx 为单位
 static CardLayout LayoutFor(int w, int h)
 {
     CardLayout L;
-    int pad    = S(CARD_PADDING);
-    int titleH = S(CARD_TITLE_HEIGHT);
+    BubbleGeometry(w, h, L.bubble, L.bubbleRx, L.bubbleRy);
 
-    L.title.left   = pad;
-    L.title.top    = pad;
-    L.title.right  = w - pad;
-    L.title.bottom = pad + titleH;
+    int cx = (L.bubble.left + L.bubble.right) / 2;
+    int cy = (L.bubble.top + L.bubble.bottom) / 2;
+    int rx = L.bubbleRx;
+    int ry = L.bubbleRy;
 
-    int cw = S(CARD_COLLAPSE_WIDTH);
-    int ch = S(CARD_COLLAPSE_HEIGHT);
-    L.collapse.right  = L.title.right;
-    L.collapse.left   = L.collapse.right - cw;
-    L.collapse.top    = L.title.top + (titleH - ch) / 2;
-    L.collapse.bottom = L.collapse.top + ch;
+    // 姓名区（气泡里只放姓名和按钮，标题已去掉）
+    L.name.left   = cx - (int)(rx * BUBBLE_TEXT_WFACTOR * 0.5);
+    L.name.right  = cx + (int)(rx * BUBBLE_TEXT_WFACTOR * 0.5);
+    L.name.top    = cy + (int)(ry * BUBBLE_NAME_DY0);
+    L.name.bottom = cy + (int)(ry * BUBBLE_NAME_DY1);
 
-    L.name.left   = pad;
-    L.name.right  = w - pad;
-    L.name.top    = pad + titleH + S(CARD_TITLE_GAP);
-    L.name.bottom = h - pad - S(CARD_BUTTON_HEIGHT) - S(CARD_BUTTON_GAP);
+    // 按钮
+    int bw = (int)(rx * BUBBLE_BUTTON_WFACTOR);
+    L.button.left   = cx - bw / 2;
+    L.button.right  = cx + bw / 2;
+    L.button.top    = cy + (int)(ry * BUBBLE_BUTTON_DY0);
+    L.button.bottom = cy + (int)(ry * BUBBLE_BUTTON_DY1);
 
-    L.button.left   = pad;
-    L.button.right  = w - pad;
-    L.button.bottom = h - pad;
-    L.button.top    = L.button.bottom - S(CARD_BUTTON_HEIGHT);
     return L;
 }
 
+// 前向声明：插画缺失提示（实现见「十五、程序入口」）
+static void WarnIfWhaleMissing();
+
+// 判断某点是否落在气泡椭圆内；气泡外即「人物本体」，点它收起卡片
+static bool PointInBubble(int x, int y, const CardLayout& L)
+{
+    double dx = (double)(x - (L.bubble.left + L.bubble.right) / 2) / (double)L.bubbleRx;
+    double dy = (double)(y - (L.bubble.top + L.bubble.bottom) / 2) / (double)L.bubbleRy;
+    return (dx * dx + dy * dy) <= 1.0;
+}
+
 // ============================================================================
-//  五、绘制
+//  五、绘制（GDI+ 逐像素 Alpha）
+//      GDI 的 Ellipse / FillRect 不写 Alpha 通道，做不出真正的透明边缘，
+//      所以整窗内容统一用 GDI+ 画到 32bpp 预乘 Alpha 位图上。
 // ============================================================================
 
-// 人物简笔画：头 + 肩膀。先按 4x4 超采样算出每像素覆盖率，
-// 写进 32 位 DIB（预乘 Alpha），再 AlphaBlend 叠加，边缘平滑且不遮盖背景渐变。
-static void DrawPersonIcon(HDC dc, const RECT& box, COLORREF fg)
+// COLORREF -> GDI+ Color
+static Gdiplus::Color GP(COLORREF c, BYTE a = 255)
 {
-    int w = box.right - box.left;
-    int h = box.bottom - box.top;
-    if (w < 4 || h < 4)
+    return Gdiplus::Color(a, GetRValue(c), GetGValue(c), GetBValue(c));
+}
+
+static Gdiplus::Color GP(BYTE r, BYTE g, BYTE b, BYTE a = 255)
+{
+    return Gdiplus::Color(a, r, g, b);
+}
+
+// 圆角矩形路径
+static void AddRoundRect(Gdiplus::GraphicsPath& path, const RECT& rc, int radius)
+{
+    int w = rc.right - rc.left;
+    int h = rc.bottom - rc.top;
+    if (w <= 0 || h <= 0)
         return;
 
-    BITMAPINFO bmi;
-    ZeroMemory(&bmi, sizeof(bmi));
-    bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth       = w;
-    bmi.bmiHeader.biHeight      = -h;          // 自上而下
-    bmi.bmiHeader.biPlanes      = 1;
-    bmi.bmiHeader.biBitCount    = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
+    if (radius < 0) radius = 0;
+    int maxR = (w < h ? w : h) / 2;
+    if (radius > maxR) radius = maxR;
 
-    void* bits = NULL;
-    HBITMAP bmp = CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &bits, NULL, 0);
-    if (bmp == NULL || bits == NULL)
+    if (radius == 0)
     {
-        if (bmp != NULL) DeleteObject(bmp);
+        path.AddRectangle(Gdiplus::Rect(rc.left, rc.top, w, h));
         return;
     }
 
-    const int SS = 4;
-    const double inv = 1.0 / (SS * SS);
+    int d = radius * 2;
+    path.AddArc(rc.left, rc.top, d, d, 180.0f, 90.0f);
+    path.AddArc(rc.right - d, rc.top, d, d, 270.0f, 90.0f);
+    path.AddArc(rc.right - d, rc.bottom - d, d, d, 0.0f, 90.0f);
+    path.AddArc(rc.left, rc.bottom - d, d, d, 90.0f, 90.0f);
+    path.CloseFigure();
+}
 
-    // 几何参数（相对图标宽度归一化）
-    const double headR  = 0.150;
-    const double headCy = 0.500 - 0.150;
-    const double bodyRx = 0.290;
-    const double bodyRy = 0.255;
-    const double bodyCy = 0.500 + 0.300;
+static void FillRoundRectG(Gdiplus::Graphics& g, const RECT& rc, int radius, Gdiplus::Color color)
+{
+    Gdiplus::GraphicsPath path;
+    AddRoundRect(path, rc, radius);
+    Gdiplus::SolidBrush brush(color);
+    g.FillPath(&brush, &path);
+}
 
-    const double fgR = GetRValue(fg);
-    const double fgG = GetGValue(fg);
-    const double fgB = GetBValue(fg);
+// 用 GDI+ 画一段居中单行文字
+static void DrawTextG(Gdiplus::Graphics& g, const RECT& rc, const std::wstring& text,
+                      Gdiplus::Color color, const wchar_t* face, int px,
+                      int weight, Gdiplus::StringAlignment align, bool ellipsis)
+{
+    if (px < 4) px = 4;
 
-    BYTE* px = (BYTE*)bits;
-
-    for (int y = 0; y < h; ++y)
+    Gdiplus::Font font(face, (Gdiplus::REAL)px, Gdiplus::FontStyleRegular,
+                       Gdiplus::UnitPixel);
+    Gdiplus::FontFamily family(face);
+    if (!font.IsAvailable())
     {
-        for (int x = 0; x < w; ++x)
-        {
-            double cov = 0.0;
-
-            for (int sy = 0; sy < SS; ++sy)
-            {
-                for (int sx = 0; sx < SS; ++sx)
-                {
-                    double u = (x + (sx + 0.5) / SS) / (double)w;
-                    double v = (y + (sy + 0.5) / SS) / (double)h;
-
-                    double hx = u - 0.5;
-                    double hy = v - headCy;
-                    if (hx * hx + hy * hy <= headR * headR)
-                    {
-                        cov += 1.0;
-                        continue;
-                    }
-
-                    double ex = (u - 0.5) / bodyRx;
-                    double ey = (v - bodyCy) / bodyRy;
-                    if (ex * ex + ey * ey <= 1.0)
-                        cov += 1.0;
-                }
-            }
-
-            if (cov <= 0.0)
-            {
-                px[0] = 0; px[1] = 0; px[2] = 0; px[3] = 0;
-            }
-            else
-            {
-                double a = cov * inv;               // 0~1
-                // 预乘 Alpha
-                px[0] = (BYTE)(fgB * a + 0.5);
-                px[1] = (BYTE)(fgG * a + 0.5);
-                px[2] = (BYTE)(fgR * a + 0.5);
-                px[3] = (BYTE)(a * 255.0 + 0.5);
-            }
-            px += 4;
-        }
+        Gdiplus::Font fallback(L"SimHei", (Gdiplus::REAL)px, Gdiplus::FontStyleRegular,
+                               Gdiplus::UnitPixel);
+        Gdiplus::SolidBrush brush(color);
+        Gdiplus::StringFormat fmt;
+        fmt.SetAlignment(align);
+        fmt.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+        fmt.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
+        if (ellipsis)
+            fmt.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
+        Gdiplus::RectF box((Gdiplus::REAL)rc.left, (Gdiplus::REAL)rc.top,
+                           (Gdiplus::REAL)(rc.right - rc.left),
+                           (Gdiplus::REAL)(rc.bottom - rc.top));
+        g.DrawString(text.c_str(), (INT)text.size(), &fallback, box, &fmt, &brush);
+        return;
     }
 
-    HDC mdc = CreateCompatibleDC(dc);
-    HGDIOBJ oldBmp = SelectObject(mdc, bmp);
+    // 需要粗体时用模拟加粗
+    if (weight >= FW_SEMIBOLD)
+    {
+        Gdiplus::Font bold(face, (Gdiplus::REAL)px, Gdiplus::FontStyleBold,
+                           Gdiplus::UnitPixel);
+        Gdiplus::SolidBrush brush(color);
+        Gdiplus::StringFormat fmt;
+        fmt.SetAlignment(align);
+        fmt.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+        fmt.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
+        if (ellipsis)
+            fmt.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
+        Gdiplus::RectF box((Gdiplus::REAL)rc.left, (Gdiplus::REAL)rc.top,
+                           (Gdiplus::REAL)(rc.right - rc.left),
+                           (Gdiplus::REAL)(rc.bottom - rc.top));
+        g.DrawString(text.c_str(), (INT)text.size(), &bold, box, &fmt, &brush);
+        return;
+    }
 
-    BLENDFUNCTION bf;
-    bf.BlendOp             = AC_SRC_OVER;
-    bf.BlendFlags          = 0;
-    bf.SourceConstantAlpha = 255;
-    bf.AlphaFormat         = AC_SRC_ALPHA;
-    AlphaBlend(dc, box.left, box.top, w, h, mdc, 0, 0, w, h, bf);
-
-    SelectObject(mdc, oldBmp);
-    DeleteDC(mdc);
-    DeleteObject(bmp);
-}
-
-static void DrawNameText(HDC dc, const RECT& rc, const std::wstring& text,
-                         COLORREF color, int basePx, double scale)
-{
-    int px = (int)(basePx * scale + 0.5);
-    if (px < 8) px = 8;
-
-    HFONT font = MakeFont(px, FW_BOLD, FONT_FACE);
-    HGDIOBJ oldFont = SelectObject(dc, font);
-    SetTextColor(dc, color);
-    RECT r = rc;
-    DrawTextW(dc, text.c_str(), (int)text.size(), &r,
-              DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
-    SelectObject(dc, oldFont);
-    DeleteObject(font);
+    Gdiplus::SolidBrush brush(color);
+    Gdiplus::StringFormat fmt;
+    fmt.SetAlignment(align);
+    fmt.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+    fmt.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
+    if (ellipsis)
+        fmt.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
+    Gdiplus::RectF box((Gdiplus::REAL)rc.left, (Gdiplus::REAL)rc.top,
+                       (Gdiplus::REAL)(rc.right - rc.left),
+                       (Gdiplus::REAL)(rc.bottom - rc.top));
+    g.DrawString(text.c_str(), (INT)text.size(), &font, box, &fmt, &brush);
 }
 
 // ---------------------------------------------------------------------------
-//  待机椭圆
+//  待机椭圆（GDI+ 绘制，逐像素 Alpha）
 // ---------------------------------------------------------------------------
-static void PaintDock(HDC dc, int w, int h)
+static void PaintDock(Gdiplus::Graphics& g, int w, int h)
 {
-    // 椭圆主体：窗口区域本身就是椭圆，逐行渐变填满（上亮下深）
+    using namespace Gdiplus;
+
+    if (w <= 0 || h <= 0)
+        return;
+
+    g.SetSmoothingMode(SmoothingModeAntiAlias);
+    g.SetPixelOffsetMode(PixelOffsetModeHighQuality);
+
+    // 主色：悬停 / 按下
     COLORREF base = COLOR_BLUE;
     if (g_dockPressed)
         base = COLOR_BLUE_DARK;
     else if (g_dockHover || g_hoverT > 0.01)
         base = COLOR_BLUE_HOVER;
 
-    COLORREF top    = COLOR_BLUE_LIGHT;                       // 顶部高光
-    COLORREF bottom = RGB(
-        ClampInt(GetRValue(base) * 0.86, 0, 255),
-        ClampInt(GetGValue(base) * 0.86, 0, 255),
-        ClampInt(GetBValue(base) * 0.86, 0, 255));            // 底部压暗
+    // 竖向渐变（上亮下深）
+    RectF box(0.0f, 0.0f, (REAL)w, (REAL)h);
+    LinearGradientBrush grad(
+        box,
+        GP(COLOR_BLUE_LIGHT),
+        GP(GetRValue(base) * 86 / 100, GetGValue(base) * 86 / 100, GetBValue(base) * 86 / 100),
+        LinearGradientModeVertical);
 
-    HBRUSH fillBrush = CreateSolidBrush(base);
-    for (int y = 0; y < h; ++y)
+    g.FillEllipse(&grad, box);
+
+    // 外描边
     {
-        double t = (double)y / (double)(h > 1 ? h - 1 : 1);
-        COLORREF c;
-        if (t < 0.42)
+        Pen pen(GP(COLOR_BLUE_DARK), 1.0f);
+        g.DrawEllipse(&pen, RectF(0.5f, 0.5f, (REAL)w - 1.0f, (REAL)h - 1.0f));
+    }
+
+    // 呼吸光圈
+    {
+        double phase = g_breath;
+        double rr = LerpD(0.30, 0.50, phase);
+        REAL penW = (REAL)(S(2) * (1.0 - phase * 0.7)) + 1.0f;
+
+        BYTE a = (BYTE)(120 * (1.0 - phase));
+        if (a > 0)
         {
-            double k = t / 0.42;
-            c = RGB(
-                ClampInt(LerpI(GetRValue(top), GetRValue(base), k), 0, 255),
-                ClampInt(LerpI(GetGValue(top), GetGValue(base), k), 0, 255),
-                ClampInt(LerpI(GetBValue(top), GetBValue(base), k), 0, 255));
+            Pen pen(Color(a, 255, 255, 255), penW);
+            REAL rx = (REAL)(w * rr);
+            REAL ry = (REAL)(h * rr);
+            g.DrawEllipse(&pen, RectF((REAL)w / 2 - rx, (REAL)h / 2 - ry, rx * 2, ry * 2));
+        }
+    }
+
+    // 人物简笔画：头 + 肩，纯白
+    {
+        double scale = 1.0 + 0.06 * g_hoverT + 0.03 * (g_breath * 2.0 - 1.0);
+        REAL side = (REAL)(w * DOCK_ICON_RATIO * scale);
+        if (side < 6.0f) side = 6.0f;
+
+        REAL cx = (REAL)w / 2.0f;
+        REAL cy = (REAL)h / 2.0f;
+        REAL unit = side;
+
+        SolidBrush white(Color(255, 255, 255, 255));
+
+        REAL headR  = unit * 0.150f;
+        REAL headCy = cy - unit * 0.150f;
+        g.FillEllipse(&white, cx - headR, headCy - headR, headR * 2, headR * 2);
+
+        REAL bodyRx = unit * 0.290f;
+        REAL bodyRy = unit * 0.255f;
+        REAL bodyCy = cy + unit * 0.300f;
+        g.FillEllipse(&white, cx - bodyRx, bodyCy - bodyRy, bodyRx * 2, bodyRy * 2);
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  卡片：小鲸鱼插画 + 气泡内 UI
+// ---------------------------------------------------------------------------
+
+// 把插画按窗口尺寸等比缩放并缓存（窗口尺寸变化时才重建）
+static void EnsureWhaleScaled(int w, int h)
+{
+    if (g_whaleBitmap == NULL || w <= 0 || h <= 0)
+        return;
+    if (g_whaleScaled != NULL && g_whaleScaledW == w && g_whaleScaledH == h)
+        return;
+
+    if (g_whaleScaled != NULL)
+    {
+        delete g_whaleScaled;
+        g_whaleScaled = NULL;
+    }
+
+    g_whaleScaled = new Gdiplus::Bitmap(w, h, PixelFormat32bppARGB);
+    if (g_whaleScaled == NULL)
+        return;
+
+    Gdiplus::Graphics g(g_whaleScaled);
+    g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+    g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+    g.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
+    g.DrawImage(g_whaleBitmap, 0, 0, w, h);
+
+    g_whaleScaledW = w;
+    g_whaleScaledH = h;
+}
+
+static void PaintCard(Gdiplus::Graphics& g, int w, int h)
+{
+    using namespace Gdiplus;
+
+    if (w <= 0 || h <= 0)
+        return;
+
+    CardLayout L = LayoutFor(w, h);
+
+    g.SetSmoothingMode(SmoothingModeAntiAlias);
+    g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
+    g.SetPixelOffsetMode(PixelOffsetModeHighQuality);
+
+    // 字号统一按气泡垂直半轴换算，改卡片尺寸/DPI 时排版自动跟着变
+    int ry = L.bubbleRy;
+
+    // ---------- 1. 背景：整张插画 ----------
+    EnsureWhaleScaled(w, h);
+    if (g_whaleScaled != NULL)
+    {
+        g.SetCompositingMode(CompositingModeSourceOver);
+        g.DrawImage(g_whaleScaled, 0, 0, w, h);
+    }
+
+    // ---------- 2. 气泡内白色底 ----------
+    {
+        REAL cx = (REAL)((L.bubble.left + L.bubble.right) / 2);
+        REAL cy = (REAL)((L.bubble.top + L.bubble.bottom) / 2);
+        REAL rx = (REAL)L.bubbleRx * (REAL)BUBBLE_FILL_INSET;
+        REAL ry = (REAL)L.bubbleRy * (REAL)BUBBLE_FILL_INSET;
+
+        SolidBrush white(GP(COLOR_CARD_BG));
+        g.FillEllipse(&white, cx - rx, cy - ry, rx * 2, ry * 2);
+    }
+
+    // ---------- 3. 姓名 ----------
+    {
+        std::wstring text;
+        Gdiplus::Color textColor = GP(COLOR_TEXT_MAIN);
+        int basePx = (int)(ry * NAME_FONT_RATIO);
+        bool isName = false;
+
+        if (g_names.empty())
+        {
+            text      = L"未找到 names.txt";
+            textColor = GP(COLOR_TEXT_SUB);
+            basePx    = (int)(ry * HINT_FONT_RATIO);
+        }
+        else if (g_displayIndex >= 0 && g_displayIndex < (int)g_names.size())
+        {
+            text   = g_names[g_displayIndex];
+            isName = true;
         }
         else
         {
-            double k = (t - 0.42) / 0.58;
-            c = RGB(
-                ClampInt(LerpI(GetRValue(base), GetRValue(bottom), k), 0, 255),
-                ClampInt(LerpI(GetGValue(base), GetGValue(bottom), k), 0, 255),
-                ClampInt(LerpI(GetBValue(base), GetBValue(bottom), k), 0, 255));
+            text      = L"点击下方按钮";
+            textColor = GP(COLOR_TEXT_SUB);
+            basePx    = (int)(ry * HINT_FONT_RATIO);
         }
 
-        HBRUSH rowBrush = CreateSolidBrush(c);
-        RECT row;
-        row.left   = 0;
-        row.top    = y;
-        row.right  = w;
-        row.bottom = y + 1;
-        FillRect(dc, &row, rowBrush);
-        DeleteObject(rowBrush);
+        if (isName)
+        {
+            HDC screen = GetDC(NULL);
+            if (screen != NULL)
+            {
+                int available = (L.name.right - L.name.left) - S(8);
+                basePx = FitFontPx(screen, text, available,
+                                   basePx, S(FONT_SIZE_NAME_MIN));
+                ReleaseDC(NULL, screen);
+            }
+        }
+
+        // 定格弹跳：字号瞬间放大再回落
+        if (g_popActive && isName)
+            basePx = (int)(basePx * (1.0 + 0.22 * (1.0 - EaseOutCubic(Clamp01(g_popT)))));
+
+        DrawTextG(g, L.name, text, textColor, FONT_FACE, basePx, FW_BOLD,
+                  StringAlignmentCenter, true);
     }
-    DeleteObject(fillBrush);
 
-    // 裁剪在椭圆内
-    HRGN clip = CreateEllipticRgn(0, 0, w + 1, h + 1);
-    SelectClipRgn(dc, clip);
-
-    // 顶部内侧极淡的高光弧（只占上缘一小段，避免看起来像划痕）
+    // ---------- 4. 蓝色「点名」按钮 ----------
     {
-        int penW = S(1) < 1 ? 1 : S(1);
-        HPEN pen = CreatePen(PS_SOLID, penW, RGB(0x7F, 0xB8, 0xF8));
-        HGDIOBJ op = SelectObject(dc, pen);
-        HGDIOBJ ob = SelectObject(dc, GetStockObject(NULL_BRUSH));
-        int inset = S(2);
-        Arc(dc, inset, inset, w - inset, h - inset,
-            (int)(w * 0.72), (int)(h * 0.16),
-            (int)(w * 0.30), (int)(h * 0.10));
-        SelectObject(dc, ob);
-        SelectObject(dc, op);
-        DeleteObject(pen);
+        COLORREF buttonColor = COLOR_BLUE;
+        if (g_rolling)
+            buttonColor = COLOR_BLUE_DISABLED;
+        else if (g_buttonDown)
+            buttonColor = COLOR_BLUE_DARK;
+        else if (g_buttonHover)
+            buttonColor = COLOR_BLUE_HOVER;
+
+        int buttonRadius = (L.button.bottom - L.button.top) / 2;
+        FillRoundRectG(g, L.button, buttonRadius, GP(buttonColor));
+
+        const wchar_t* buttonText = g_rolling ? L"抽取中…" : L"点 名";
+        DrawTextG(g, L.button, buttonText, GP(COLOR_BUTTON_TEXT), FONT_FACE,
+                  (int)(ry * BUTTON_FONT_RATIO), FW_BOLD,
+                  StringAlignmentCenter, false);
     }
-
-    // 呼吸光圈：从图标向外扩散并变淡
-    {
-        double phase = g_breath;                 // 0~1
-        double rr = LerpD(0.30, 0.50, phase);    // 半径比例
-        int    penW = (int)(S(2) * (1.0 - phase * 0.7)) + 1;
-        int    mix = (int)(phase * 255.0);
-        COLORREF ringColor = RGB(
-            ClampInt(LerpI(GetRValue(COLOR_BLUE_LIGHT), GetRValue(base), phase), 0, 255),
-            ClampInt(LerpI(GetGValue(COLOR_BLUE_LIGHT), GetGValue(base), phase), 0, 255),
-            ClampInt(LerpI(GetBValue(COLOR_BLUE_LIGHT), GetBValue(base), phase), 0, 255));
-        (void)mix;
-
-        HPEN pen = CreatePen(PS_SOLID, penW, ringColor);
-        HGDIOBJ op = SelectObject(dc, pen);
-        HGDIOBJ ob = SelectObject(dc, GetStockObject(NULL_BRUSH));
-        int rx = (int)(w * rr);
-        int ry = (int)(h * rr);
-        Ellipse(dc, w / 2 - rx, h / 2 - ry, w / 2 + rx, h / 2 + ry);
-        SelectObject(dc, ob);
-        SelectObject(dc, op);
-        DeleteObject(pen);
-    }
-
-    // 人物图标（随悬停 / 呼吸轻微缩放）
-    {
-        double scale = 1.0 + 0.06 * g_hoverT + 0.03 * (g_breath * 2.0 - 1.0);
-        int side = (int)(w * DOCK_ICON_RATIO * scale);
-        if (side < 6) side = 6;
-        int cx = w / 2;
-        int cy = h / 2;
-        RECT box;
-        box.left   = cx - side / 2;
-        box.top    = cy - side / 2;
-        box.right  = box.left + side;
-        box.bottom = box.top + side;
-        DrawPersonIcon(dc, box, RGB(255, 255, 255));
-    }
-
-    SelectClipRgn(dc, NULL);
-    DeleteObject(clip);
-
-    // 椭圆边缘 1px 深色描边，让它在浅色桌面上有轮廓
-    HPEN pen = CreatePen(PS_SOLID, 1, COLOR_BLUE_DARK);
-    HGDIOBJ op = SelectObject(dc, pen);
-    HGDIOBJ ob = SelectObject(dc, GetStockObject(NULL_BRUSH));
-    Ellipse(dc, 0, 0, w, h);
-    SelectObject(dc, ob);
-    SelectObject(dc, op);
-    DeleteObject(pen);
 }
 
-// ---------------------------------------------------------------------------
-//  卡片
-// ---------------------------------------------------------------------------
-static void PaintCard(HDC dc, int w, int h)
-{
-    RECT rc = {0, 0, w, h};
-    CardLayout L = LayoutFor(w, h);
-
-    HBRUSH bgBrush = CreateSolidBrush(COLOR_CARD_BG);
-    FillRect(dc, &rc, bgBrush);
-    DeleteObject(bgBrush);
-
-    SetBkMode(dc, TRANSPARENT);
-
-    // ---------- 顶部蓝色标题 ----------
-    int barW = S(4);
-    int barH = S(18);
-    RECT accent;
-    accent.left   = L.title.left;
-    accent.right  = L.title.left + barW;
-    accent.top    = L.title.top + (L.title.bottom - L.title.top - barH) / 2;
-    accent.bottom = accent.top + barH;
-    FillRoundRect(dc, accent, S(2), COLOR_BLUE);
-
-    RECT titleText = L.title;
-    titleText.left = accent.right + S(10);
-    HGDIOBJ oldFont = SelectObject(dc, g_fontTitle);
-    SetTextColor(dc, COLOR_BLUE);
-    DrawTextW(dc, L"随机点名", -1, &titleText,
-              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-    SelectObject(dc, oldFont);
-
-    // ---------- 右上角「收起」 ----------
-    if (g_collapseHover || g_collapseDown)
-        FillRoundRect(dc, L.collapse, S(6), COLOR_BLUE_SOFT);
-
-    oldFont = SelectObject(dc, g_fontCollapse);
-    SetTextColor(dc, (g_collapseHover || g_collapseDown) ? COLOR_BLUE : COLOR_TEXT_SUB);
-    DrawTextW(dc, L"收起", -1, &L.collapse,
-              DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-    SelectObject(dc, oldFont);
-
-    // ---------- 分隔线 ----------
-    RECT divider;
-    divider.left   = S(CARD_PADDING);
-    divider.right  = w - S(CARD_PADDING);
-    divider.top    = L.title.bottom + S(CARD_TITLE_GAP) / 2;
-    divider.bottom = divider.top + 1;
-    HBRUSH lineBrush = CreateSolidBrush(COLOR_DIVIDER);
-    FillRect(dc, &divider, lineBrush);
-    DeleteObject(lineBrush);
-
-    // ---------- 中部姓名 ----------
-    std::wstring text;
-    COLORREF textColor = COLOR_TEXT_MAIN;
-    int basePx = S(FONT_SIZE_NAME);
-    bool isName = false;
-
-    if (g_names.empty())
-    {
-        text      = L"未找到 names.txt";
-        textColor = COLOR_TEXT_SUB;
-        basePx    = S(FONT_SIZE_NAME_HINT);
-    }
-    else if (g_displayIndex >= 0 && g_displayIndex < (int)g_names.size())
-    {
-        text   = g_names[g_displayIndex];
-        isName = true;
-    }
-    else
-    {
-        text      = L"点击下方按钮";
-        textColor = COLOR_TEXT_SUB;
-        basePx    = S(FONT_SIZE_NAME_HINT);
-    }
-
-    if (isName)
-    {
-        int available = (L.name.right - L.name.left) - S(8);
-        basePx = FitFontPx(dc, text, available, S(FONT_SIZE_NAME), S(FONT_SIZE_NAME_MIN));
-    }
-
-    double popScale = 1.0;
-    if (g_popActive && isName)
-        popScale = 1.0 + 0.22 * (1.0 - EaseOutCubic(Clamp01(g_popT)));
-
-    DrawNameText(dc, L.name, text, textColor, basePx, popScale);
-
-    // ---------- 底部蓝色按钮 ----------
-    COLORREF buttonColor = COLOR_BLUE;
-    if (g_rolling)
-        buttonColor = COLOR_BLUE_DISABLED;
-    else if (g_buttonDown)
-        buttonColor = COLOR_BLUE_DARK;
-    else if (g_buttonHover)
-        buttonColor = COLOR_BLUE_HOVER;
-    FillRoundRect(dc, L.button, S(CARD_BUTTON_RADIUS), buttonColor);
-
-    const wchar_t* buttonText = g_rolling ? L"抽取中…" : L"点 名";
-    oldFont = SelectObject(dc, g_fontButton);
-    SetTextColor(dc, COLOR_BUTTON_TEXT);
-    DrawTextW(dc, buttonText, -1, &L.button,
-              DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-    SelectObject(dc, oldFont);
-
-    // ---------- 卡片描边 ----------
-    FrameRoundRect(dc, rc, S(CARD_RADIUS), COLOR_DIVIDER);
-}
-
-// 动画期间：把整张卡片渲染到全尺寸位图，再等比缩放并居中到当前窗口，
-// 这样窗口从「椭圆」长成「卡片」的过程中，内容不会被压扁变形。
-static void PaintCardScaled(HDC dc, int curW, int curH)
+// 动画期间：把整张卡片渲染到全尺寸位图，再等比缩放居中到当前窗口
+static void PaintCardScaled(Gdiplus::Graphics& g, int curW, int curH)
 {
     int fullW = S(CARD_WIDTH);
-    int fullH = S(CARD_HEIGHT);
+    int fullH = fullW;
     if (fullW < 8) fullW = 8;
     if (fullH < 8) fullH = 8;
 
-    // 等比缩放：取较小的缩放系数，保证卡片完整可见
     double sx = (double)curW / (double)fullW;
     double sy = (double)curH / (double)fullH;
     double s  = (sx < sy) ? sx : sy;
@@ -800,52 +801,146 @@ static void PaintCardScaled(HDC dc, int curW, int curH)
     int dx = (curW - drawW) / 2;
     int dy = (curH - drawH) / 2;
 
-    // 形变过程中窗口未必是正方形，卡片之外的留白统一填白，避免出现残影
-    RECT client = {0, 0, curW, curH};
-    HBRUSH white = CreateSolidBrush(COLOR_CARD_BG);
-    FillRect(dc, &client, white);
-    DeleteObject(white);
+    Gdiplus::Bitmap buffer(fullW, fullH, PixelFormat32bppARGB);
+    {
+        Gdiplus::Graphics bg(&buffer);
+        bg.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
+        bg.Clear(Gdiplus::Color(0, 0, 0, 0));
+        bg.SetCompositingMode(Gdiplus::CompositingModeSourceOver);
+        PaintCard(bg, fullW, fullH);
+    }
 
-    HDC mdc = CreateCompatibleDC(dc);
-    HBITMAP bmp = CreateCompatibleBitmap(dc, fullW, fullH);
-    HGDIOBJ oldBmp = SelectObject(mdc, bmp);
+    g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+    g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+    g.DrawImage(&buffer, dx, dy, drawW, drawH);
+}
 
-    PaintCard(mdc, fullW, fullH);
+// ---------------------------------------------------------------------------
+//  逐像素 Alpha 渲染：画到 32 位 DIB，再用 UpdateLayeredWindow 提交
+// ---------------------------------------------------------------------------
+static void ReleaseMemSurface()
+{
+    if (g_memDC != NULL)
+    {
+        if (g_memOldBmp != NULL)
+            SelectObject(g_memDC, g_memOldBmp);
+        DeleteDC(g_memDC);
+        g_memDC = NULL;
+    }
+    if (g_memBmp != NULL)
+    {
+        DeleteObject(g_memBmp);
+        g_memBmp = NULL;
+    }
+    g_memOldBmp = NULL;
+    g_memW = 0;
+    g_memH = 0;
+}
 
-    SetStretchBltMode(dc, HALFTONE);
-    SetBrushOrgEx(dc, 0, 0, NULL);
-    StretchBlt(dc, dx, dy, drawW, drawH, mdc, 0, 0, fullW, fullH, SRCCOPY);
+// 确保离屏 DIB 尺寸与窗口一致（32bpp 预乘 Alpha）
+static bool EnsureMemSurface(HDC refDC, int w, int h)
+{
+    if (w <= 0 || h <= 0)
+        return false;
 
-    SelectObject(mdc, oldBmp);
-    DeleteObject(bmp);
-    DeleteDC(mdc);
+    if (g_memDC != NULL && g_memW == w && g_memH == h)
+        return true;
+
+    ReleaseMemSurface();
+
+    BITMAPINFO bmi;
+    ZeroMemory(&bmi, sizeof(bmi));
+    bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth       = w;
+    bmi.bmiHeader.biHeight      = -h;          // 自上而下
+    bmi.bmiHeader.biPlanes      = 1;
+    bmi.bmiHeader.biBitCount    = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    void* bits = NULL;
+    g_memBmp = CreateDIBSection(refDC, &bmi, DIB_RGB_COLORS, &bits, NULL, 0);
+    if (g_memBmp == NULL || bits == NULL)
+    {
+        if (g_memBmp != NULL)
+        {
+            DeleteObject(g_memBmp);
+            g_memBmp = NULL;
+        }
+        return false;
+    }
+
+    g_memDC = CreateCompatibleDC(refDC);
+    if (g_memDC == NULL)
+    {
+        DeleteObject(g_memBmp);
+        g_memBmp = NULL;
+        return false;
+    }
+
+    g_memOldBmp = SelectObject(g_memDC, g_memBmp);
+    g_memW = w;
+    g_memH = h;
+    return true;
+}
+
+// 把整窗内容画进离屏缓冲并提交给分层窗口
+static void RenderFrame(int x, int y, int w, int h, int alpha)
+{
+    if (w <= 0 || h <= 0)
+        return;
+
+    HDC screen = GetDC(NULL);
+    if (screen == NULL)
+        return;
+
+    if (EnsureMemSurface(screen, w, h))
+    {
+        {
+            // GDI+ 直接在 DIB 上作画，Alpha 通道由 GDI+ 维护
+            Gdiplus::Graphics g(g_memDC);
+            g.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
+            g.Clear(Gdiplus::Color(0, 0, 0, 0));
+            g.SetCompositingMode(Gdiplus::CompositingModeSourceOver);
+
+            if (g_anim.kind == ANIM_EXPAND || g_anim.kind == ANIM_COLLAPSE)
+                PaintCardScaled(g, w, h);
+            else if (g_expanded)
+                PaintCard(g, w, h);
+            else
+                PaintDock(g, w, h);
+        }
+
+        GdiFlush();
+
+        POINT dst;
+        dst.x = x;
+        dst.y = y;
+        SIZE size;
+        size.cx = w;
+        size.cy = h;
+        POINT src;
+        src.x = 0;
+        src.y = 0;
+
+        BLENDFUNCTION bf;
+        bf.BlendOp             = AC_SRC_OVER;
+        bf.BlendFlags          = 0;
+        bf.SourceConstantAlpha = (BYTE)ClampInt(alpha, 0, 255);
+        bf.AlphaFormat         = AC_SRC_ALPHA;
+
+        UpdateLayeredWindow(g_hWnd, screen, &dst, &size,
+                            g_memDC, &src, 0, &bf, ULW_ALPHA);
+    }
+
+    ReleaseDC(NULL, screen);
 }
 
 static void OnPaint(HWND hwnd)
 {
+    // 分层窗口由 UpdateLayeredWindow 提交内容，WM_PAINT 只做确认
     PAINTSTRUCT ps;
     HDC dc = BeginPaint(hwnd, &ps);
-
-    RECT rc = ClientRectOf(hwnd);
-    int w = rc.right - rc.left;
-    int h = rc.bottom - rc.top;
-
-    if (w > 0 && h > 0)
-    {
-        if (g_anim.kind == ANIM_EXPAND || g_anim.kind == ANIM_COLLAPSE)
-        {
-            PaintCardScaled(dc, w, h);
-        }
-        else if (g_expanded)
-        {
-            PaintCard(dc, w, h);
-        }
-        else
-        {
-            PaintDock(dc, w, h);
-        }
-    }
-
+    (void)dc;
     EndPaint(hwnd, &ps);
 }
 
@@ -878,13 +973,30 @@ static RECT ComputeDockRect()
     return r;
 }
 
+// 卡片边长：设计尺寸，但在小屏 / 高缩放下自动收缩，保证整窗不出屏
+static int CardSizePx()
+{
+    RECT work = WorkAreaRect();
+    int availW = work.right - work.left - S(CARD_RIGHT_MARGIN) * 2;
+    int availH = work.bottom - work.top - S(16);
+
+    int size = S(CARD_WIDTH);
+    if (size > availW) size = availW;
+    if (size > availH) size = availH;
+
+    int minSize = S(260);
+    if (size < minSize) size = minSize;
+    return size;
+}
+
 static RECT ComputeCardRect()
 {
     RECT work = WorkAreaRect();
     RECT dock = ComputeDockRect();
 
-    int w = S(CARD_WIDTH);
-    int h = S(CARD_HEIGHT);
+    int size = CardSizePx();
+    int w = size;
+    int h = size;
 
     int x = work.right - w - S(CARD_RIGHT_MARGIN);
     int dockCy = (dock.top + dock.bottom) / 2;
@@ -901,8 +1013,11 @@ static RECT ComputeCardRect()
     return r;
 }
 
+// 提交一帧：定位窗口 + 重绘整窗内容（逐像素 Alpha，无需窗口区域）
 static void ApplyWindowRect(const RECT& rc, int radius, int alpha)
 {
+    (void)radius;      // 逐像素 Alpha 下不需要圆角区域，形变靠绘制内容本身
+
     int w = rc.right - rc.left;
     int h = rc.bottom - rc.top;
     if (w < 1) w = 1;
@@ -911,37 +1026,37 @@ static void ApplyWindowRect(const RECT& rc, int radius, int alpha)
     SetWindowPos(g_hWnd, HWND_TOPMOST, rc.left, rc.top, w, h,
                  SWP_NOACTIVATE | SWP_NOOWNERZORDER);
 
-    if (radius < 1) radius = 1;
-    int maxR = (w < h ? w : h) / 2;
-    if (radius > maxR) radius = maxR;
-
-    HRGN rgn = CreateRoundRectRgn(0, 0, w + 1, h + 1, radius * 2, radius * 2);
-    if (rgn != NULL)
-        SetWindowRgn(g_hWnd, rgn, TRUE);
-
-    alpha = ClampInt(alpha, 0, 255);
-    SetLayeredWindowAttributes(g_hWnd, 0, (BYTE)alpha, LWA_ALPHA);
+    RenderFrame(rc.left, rc.top, w, h, alpha);
 }
 
 static void SetDockRegion()
 {
-    int w = S(DOCK_WIDTH);
-    int h = S(DOCK_HEIGHT);
-    HRGN rgn = CreateEllipticRgn(0, 0, w + 1, h + 1);
-    if (rgn != NULL)
-        SetWindowRgn(g_hWnd, rgn, TRUE);
-    SetLayeredWindowAttributes(g_hWnd, 0, 255, LWA_ALPHA);
+    // 待机椭圆靠逐像素 Alpha 出形，无需 SetWindowRgn
+    RECT rc = ComputeDockRect();
+    RenderFrame(rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, 255);
 }
 
 static void SetCardRegion()
 {
-    int w = S(CARD_WIDTH);
-    int h = S(CARD_HEIGHT);
-    int r = S(CARD_RADIUS);
-    HRGN rgn = CreateRoundRectRgn(0, 0, w + 1, h + 1, r * 2, r * 2);
-    if (rgn != NULL)
-        SetWindowRgn(g_hWnd, rgn, TRUE);
-    SetLayeredWindowAttributes(g_hWnd, 0, 255, LWA_ALPHA);
+    RECT rc = ComputeCardRect();
+    RenderFrame(rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, 255);
+}
+
+// 分层窗口的内容由 UpdateLayeredWindow 提交，InvalidateRect 不会触发重绘，
+// 因此所有「刷新界面」的地方统一调用这里：取当前窗口矩形重新渲染一帧。
+static void RepaintNow()
+{
+    if (g_hWnd == NULL)
+        return;
+
+    RECT rc;
+    GetWindowRect(g_hWnd, &rc);
+    int w = rc.right - rc.left;
+    int h = rc.bottom - rc.top;
+    if (w <= 0 || h <= 0)
+        return;
+
+    RenderFrame(rc.left, rc.top, w, h, 255);
 }
 
 static void StartAnim(AnimKind kind, const RECT& from, const RECT& to,
@@ -990,7 +1105,7 @@ static void BeginExpandAnimation()
     RECT to   = ComputeCardRect();
 
     StartAnim(ANIM_EXPAND, from, to,
-              S(DOCK_HEIGHT) / 2, S(CARD_RADIUS),
+              S(DOCK_HEIGHT) / 2, S(DOCK_HEIGHT) / 2,
               g_cfg.animMs, 90, 255);
 
     SetForegroundWindow(g_hWnd);
@@ -1007,7 +1122,7 @@ static void BeginCollapseAnimation()
     RECT to = ComputeDockRect();
 
     StartAnim(ANIM_COLLAPSE, from, to,
-              S(CARD_RADIUS), S(DOCK_HEIGHT) / 2,
+              S(DOCK_HEIGHT) / 2, S(DOCK_HEIGHT) / 2,
               ANIM_COLLAPSE_MS, 255, 40);
 }
 
@@ -1015,7 +1130,6 @@ static void FinishExpand()
 {
     g_expanded      = true;
     g_buttonHover   = false;
-    g_collapseHover = false;
 
     RECT rc = ComputeCardRect();
     SetWindowPos(g_hWnd, HWND_TOPMOST, rc.left, rc.top,
@@ -1023,16 +1137,14 @@ static void FinishExpand()
                  SWP_NOACTIVATE | SWP_NOOWNERZORDER);
     SetCardRegion();
     StopAnimTimer();
-    InvalidateRect(g_hWnd, NULL, FALSE);
+    RepaintNow();
 }
 
 static void FinishCollapse()
 {
     g_expanded = false;
     g_buttonHover   = false;
-    g_collapseHover = false;
     g_buttonDown    = false;
-    g_collapseDown  = false;
 
     RECT rc = ComputeDockRect();
     SetWindowPos(g_hWnd, HWND_TOPMOST, rc.left, rc.top,
@@ -1041,7 +1153,7 @@ static void FinishCollapse()
     SetDockRegion();
     StopAnimTimer();
     StartIdleTimer();
-    InvalidateRect(g_hWnd, NULL, FALSE);
+    RepaintNow();
 }
 
 static void AnimTick()
@@ -1065,7 +1177,7 @@ static void AnimTick()
             g_popT = 1.0;
             StopAnimTimer();
         }
-        InvalidateRect(g_hWnd, NULL, FALSE);
+        RepaintNow();
         return;
     }
 
@@ -1094,7 +1206,7 @@ static void AnimTick()
     int alpha  = LerpI(g_anim.alphaFrom, g_anim.alphaTo, Clamp01(t));
 
     ApplyWindowRect(rc, radius, alpha);
-    InvalidateRect(g_hWnd, NULL, FALSE);
+    RepaintNow();
 
     if (t >= 1.0)
     {
@@ -1105,7 +1217,7 @@ static void AnimTick()
         else
         {
             StopAnimTimer();
-            InvalidateRect(g_hWnd, NULL, FALSE);
+            RepaintNow();
         }
     }
 }
@@ -1131,7 +1243,7 @@ static void IdleTick()
         else                   g_hoverT = (g_hoverT - step < 0.0) ? 0.0 : g_hoverT - step;
     }
 
-    InvalidateRect(g_hWnd, NULL, FALSE);
+    RepaintNow();
 }
 
 // ============================================================================
@@ -1968,7 +2080,7 @@ static void FinishRoll()
     StartAnim(ANIM_POP, ClientRectOf(g_hWnd), ClientRectOf(g_hWnd), 0, 0, RESULT_POP_MS, 0, 0);
     SoundResult();
 
-    InvalidateRect(g_hWnd, NULL, FALSE);
+    RepaintNow();
 }
 
 static void RollTick()
@@ -1998,7 +2110,7 @@ static void RollTick()
         interval = 10;
 
     SetTimer(g_hWnd, TIMER_ROLL, (UINT)interval, NULL);
-    InvalidateRect(g_hWnd, NULL, FALSE);
+    RepaintNow();
 }
 
 static void StartRoll()
@@ -2182,7 +2294,7 @@ static void OnMouseMove(HWND hwnd, int x, int y)
         if (!g_dockHover)
         {
             g_dockHover = true;
-            InvalidateRect(hwnd, NULL, FALSE);
+            RepaintNow();
         }
         return;
     }
@@ -2195,18 +2307,20 @@ static void OnMouseMove(HWND hwnd, int x, int y)
     pt.x = x;
     pt.y = y;
 
-    bool overButton   = (PtInRect(&L.button, pt) != 0);
-    bool overCollapse = (PtInRect(&L.collapse, pt) != 0);
+    bool overButton = (PtInRect(&L.button, pt) != 0);
 
     if (overButton != g_buttonHover)
     {
         g_buttonHover = overButton;
-        InvalidateRect(hwnd, NULL, FALSE);
+        RepaintNow();
     }
-    if (overCollapse != g_collapseHover)
+
+    // 气泡之外是人物本体，悬停时给出「可点击收起」的手型光标
+    bool overBody = !PointInBubble(x, y, L);
+    if (overBody != g_bodyHover)
     {
-        g_collapseHover = overCollapse;
-        InvalidateRect(hwnd, NULL, FALSE);
+        g_bodyHover = overBody;
+        RepaintNow();
     }
 }
 
@@ -2227,7 +2341,7 @@ static void OnLButtonDown(HWND hwnd, int x, int y)
         GetCursorPos(&g_dragCursorStart);
         g_dockDragStartY = ComputeDockRect().top;
         SetCapture(hwnd);
-        InvalidateRect(hwnd, NULL, FALSE);
+        RepaintNow();
         return;
     }
 
@@ -2244,21 +2358,12 @@ static void OnLButtonDown(HWND hwnd, int x, int y)
         {
             g_buttonDown = true;
             SetCapture(hwnd);
-            InvalidateRect(hwnd, &L.button, FALSE);
+            RepaintNow();
         }
         return;
     }
 
-    // ---------- 收起 ----------
-    if (PtInRect(&L.collapse, pt))
-    {
-        g_collapseDown = true;
-        SetCapture(hwnd);
-        InvalidateRect(hwnd, &L.collapse, FALSE);
-        return;
-    }
-
-    // ---------- 其余区域：拖动卡片 ----------
+    // ---------- 其余区域（气泡外的人物本体 / 气泡空白）：按下先当作拖动 ----------
     g_cardDragging = true;
     g_cardMoved    = false;
     GetCursorPos(&g_dragCursorStart);
@@ -2276,7 +2381,6 @@ static void OnLButtonUp(HWND hwnd, int x, int y)
     bool wasDockDrag    = g_dockDragging;
     bool wasDockMoved   = g_dockMoved;
     bool wasButtonDown  = g_buttonDown;
-    bool wasCollapseDown= g_collapseDown;
     bool wasCardDrag    = g_cardDragging;
     bool wasCardMoved   = g_cardMoved;
 
@@ -2284,7 +2388,6 @@ static void OnLButtonUp(HWND hwnd, int x, int y)
     g_dockDragging = false;
     g_dockMoved    = false;
     g_buttonDown   = false;
-    g_collapseDown = false;
     g_cardDragging = false;
     g_cardMoved    = false;
 
@@ -2294,7 +2397,7 @@ static void OnLButtonUp(HWND hwnd, int x, int y)
     // ---------- 待机椭圆 ----------
     if (wasDockDown || wasDockDrag)
     {
-        InvalidateRect(hwnd, NULL, FALSE);
+        RepaintNow();
         if (wasDockMoved)
         {
             // 拖动结束：记住位置
@@ -2313,28 +2416,28 @@ static void OnLButtonUp(HWND hwnd, int x, int y)
     {
         RECT client = ClientRectOf(hwnd);
         CardLayout L = LayoutFor(client.right, client.bottom);
-        InvalidateRect(hwnd, &L.button, FALSE);
+        RepaintNow();
         if (PtInRect(&L.button, pt))
             StartRoll();
         return;
     }
 
-    // ---------- 收起 ----------
-    if (wasCollapseDown)
+    // ---------- 气泡外点一下：人物本体，收起卡片 ----------
+    // 拖动过就不算点击，避免拖窗口时误收起
+    if (wasCardDrag && !wasCardMoved)
     {
         RECT client = ClientRectOf(hwnd);
         CardLayout L = LayoutFor(client.right, client.bottom);
-        InvalidateRect(hwnd, &L.collapse, FALSE);
-        if (PtInRect(&L.collapse, pt))
+        if (!PointInBubble(x, y, L) && g_expanded)
         {
             SoundCollapse();
             BeginCollapseAnimation();
+            return;
         }
-        return;
     }
 
     if (wasCardDrag && wasCardMoved)
-        InvalidateRect(hwnd, NULL, FALSE);
+        RepaintNow();
 }
 
 static void ShowContextMenu(HWND hwnd)
@@ -2398,7 +2501,7 @@ static void ShowContextMenu(HWND hwnd)
             MessageBoxW(NULL, L"重新加载失败：请检查程序目录下的 names.txt。",
                         L"随机点名", MB_OK | MB_ICONWARNING);
         }
-        InvalidateRect(hwnd, NULL, TRUE);
+        RepaintNow();
         break;
 
     case IDM_EDIT:
@@ -2433,7 +2536,7 @@ static void ShowContextMenu(HWND hwnd)
 
     case IDM_ABOUT:
         MessageBoxW(NULL,
-                    L"随机点名 v2.0\n\n"
+                    L"随机点名 v0.9.9\n\n"
                     L"纯 Win32 API 实现的桌面点名浮窗。\n"
                     L"左键点右侧椭圆展开，右键菜单可重新加载名单 / 开关音效 / 退出。\n\n"
                     L"配置文件：settings.ini\n名单文件：names.txt",
@@ -2491,8 +2594,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         g_trackingMouse = false;
         g_dockHover     = false;
         g_buttonHover   = false;
-        g_collapseHover = false;
-        InvalidateRect(hwnd, NULL, FALSE);
+            RepaintNow();
         return 0;
 
     case WM_CAPTURECHANGED:
@@ -2502,7 +2604,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         g_dockDragging = false;
         g_dockMoved    = false;
         g_buttonDown   = false;
-        g_collapseDown = false;
         return 0;
 
     case WM_SETCURSOR:
@@ -2520,10 +2621,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
             RECT client = ClientRectOf(hwnd);
             CardLayout L = LayoutFor(client.right, client.bottom);
-            if (PtInRect(&L.button, pt) || PtInRect(&L.collapse, pt))
-                SetCursor(g_curHand);
+
+            if (PtInRect(&L.button, pt))
+                SetCursor(g_curHand);                    // 按钮：手型
+            else if (!PointInBubble(pt.x, pt.y, L))
+                SetCursor(g_curHand);                    // 人物本体：点了收起
             else
-                SetCursor(g_curSizeAll);
+                SetCursor(g_curSizeAll);                 // 气泡空白：可拖动
             return TRUE;
         }
         break;
@@ -2548,7 +2652,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             RECT rc = ComputeDockRect();
             SetWindowPos(hwnd, HWND_TOPMOST, rc.left, rc.top, 0, 0,
                          SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
-            InvalidateRect(hwnd, NULL, TRUE);
+            RepaintNow();
         }
         return 0;
 
@@ -2583,6 +2687,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
         return 0;
 
+    case WM_APP + 9:
+        // 插画缺失提示（启动后延迟弹出，避免挡住入场动画）
+        WarnIfWhaleMissing();
+        return 0;
+
     case WM_DESTROY:
         KillTimer(hwnd, TIMER_ANIM);
         KillTimer(hwnd, TIMER_IDLE);
@@ -2612,23 +2721,89 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
 static void InitFonts()
 {
-    g_fontTitle    = MakeFont(S(FONT_SIZE_TITLE),    FW_BOLD,   FONT_FACE);
-    g_fontHint     = MakeFont(S(FONT_SIZE_NAME_HINT), FW_NORMAL, FONT_FACE);
-    g_fontButton   = MakeFont(S(FONT_SIZE_BUTTON),   FW_BOLD,   FONT_FACE);
-    g_fontCollapse = MakeFont(S(FONT_SIZE_COLLAPSE), FW_NORMAL, FONT_FACE);
+    // 字体现在由 GDI+ 按需创建，这里只保留一个 GDI 字体用于文字宽度测量
+    g_fontHint = MakeFont(S(FONT_SIZE_NAME_MIN), FW_NORMAL, FONT_FACE);
 }
 
 static void DestroyFonts()
 {
-    HFONT* fonts[] = { &g_fontTitle, &g_fontHint, &g_fontButton, &g_fontCollapse };
-    for (int i = 0; i < (int)(sizeof(fonts) / sizeof(fonts[0])); ++i)
+    if (g_fontHint != NULL)
     {
-        if (*fonts[i] != NULL)
-        {
-            DeleteObject(*fonts[i]);
-            *fonts[i] = NULL;
-        }
+        DeleteObject(g_fontHint);
+        g_fontHint = NULL;
     }
+}
+
+// ---------- GDI+ ----------
+static void InitGdiplus()
+{
+    Gdiplus::GdiplusStartupInput input;
+    if (Gdiplus::GdiplusStartup(&g_gdiplusToken, &input, NULL) != Gdiplus::Ok)
+        g_gdiplusToken = 0;
+}
+
+static void ShutdownGdiplus()
+{
+    if (g_whaleScaled != NULL)
+    {
+        delete g_whaleScaled;
+        g_whaleScaled = NULL;
+    }
+    if (g_whaleBitmap != NULL)
+    {
+        delete g_whaleBitmap;
+        g_whaleBitmap = NULL;
+    }
+    ReleaseMemSurface();
+
+    if (g_gdiplusToken != 0)
+    {
+        Gdiplus::GdiplusShutdown(g_gdiplusToken);
+        g_gdiplusToken = 0;
+    }
+}
+
+// 从 exe 同目录 assets/whale.png 加载插画
+static void LoadWhaleImage()
+{
+    g_whalePath = g_exeDir + L"\\" + WHALE_ASSET_DIR + L"\\" + WHALE_ASSET_NAME;
+
+    if (GetFileAttributesW(g_whalePath.c_str()) == INVALID_FILE_ATTRIBUTES)
+    {
+        g_whaleMissing = true;
+        return;
+    }
+
+    Gdiplus::Bitmap* bmp = new Gdiplus::Bitmap(g_whalePath.c_str(), FALSE);
+    if (bmp == NULL)
+    {
+        g_whaleMissing = true;
+        return;
+    }
+
+    if (bmp->GetLastStatus() != Gdiplus::Ok || bmp->GetWidth() < 2 || bmp->GetHeight() < 2)
+    {
+        delete bmp;
+        g_whaleMissing = true;
+        return;
+    }
+
+    g_whaleBitmap  = bmp;
+    g_whaleMissing = false;
+}
+
+// 插画缺失时的兜底提示（不影响待机条与点名功能）
+static void WarnIfWhaleMissing()
+{
+    if (!g_whaleMissing)
+        return;
+
+    std::wstring msg =
+        L"未找到界面插画：\n" + g_whalePath +
+        L"\n\n程序仍可正常点名，但展开后的卡片会是纯色背景。\n"
+        L"请把 assets 文件夹（内含 whale.png）放到程序所在目录。\n\n"
+        L"素材来源：dsh-whale-widget 插件，作者 MeteorNOX（MIT）。";
+    MessageBoxW(NULL, msg.c_str(), L"随机点名 · 提示", MB_OK | MB_ICONWARNING);
 }
 
 static void EnableDpiAwareness()
@@ -2700,6 +2875,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
     SeedRandom();
     InitFonts();
+    InitGdiplus();
 
     g_curHand    = LoadCursor(NULL, IDC_HAND);
     g_curSizeAll = LoadCursor(NULL, IDC_SIZEALL);
@@ -2747,11 +2923,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     // ---------- 名单 ----------
     LoadNames(true);
 
+    // ---------- 界面插画 ----------
+    LoadWhaleImage();
+
     // ---------- 窗口类 ----------
     WNDCLASSEXW wc;
     ZeroMemory(&wc, sizeof(wc));
     wc.cbSize        = sizeof(wc);
-    wc.style         = CS_DROPSHADOW;
     wc.lpfnWndProc   = WndProc;
     wc.hInstance     = hInstance;
     wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
@@ -2778,10 +2956,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     if (g_hWnd == NULL)
     {
         DestroyFonts();
+        ShutdownGdiplus();
         return 1;
     }
 
-    SetDockRegion();
+    // 逐像素 Alpha 分层窗口：内容由 UpdateLayeredWindow 提交
+    ShowWindow(g_hWnd, SW_SHOWNOACTIVATE);
 
     // ---------- 托盘 / 音频 / 自启 ----------
     AddTrayIcon();
@@ -2803,9 +2983,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
               S(DOCK_HEIGHT) / 2, S(DOCK_HEIGHT) / 2,
               ANIM_ENTER_MS, 0, 255);
 
-    ShowWindow(g_hWnd, SW_SHOWNOACTIVATE);
-    UpdateWindow(g_hWnd);
     StartIdleTimer();
+
+    // 插画缺失时给出一次提示（不影响点名）
+    if (g_whaleMissing)
+        PostMessageW(g_hWnd, WM_APP + 9, 0, 0);
 
     // ---------- 消息循环 ----------
     MSG msg;
@@ -2816,6 +2998,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     }
 
     DestroyFonts();
+    ShutdownGdiplus();
     if (g_trayIcon != NULL)
     {
         DestroyIcon(g_trayIcon);
