@@ -1,5 +1,5 @@
-// ============================================================================
-//  随机点名 · Windows 原生悬浮窗程序  v1.0.0
+﻿// ============================================================================
+//  随机点名 · Windows 原生悬浮窗程序  v1.0.1
 //  ----------------------------------------------------------------------------
 //  作者：6evan775（名名）   https://github.com/6evan775
 //  协议：MIT License
@@ -81,6 +81,11 @@
 #pragma comment(lib, "gdiplus.lib")
 #endif
 
+// MinGW 的部分版本未在 winuser.h 中导出 WM_TOUCH，这里补一个定义
+#ifndef WM_TOUCH
+#define WM_TOUCH 0x0240
+#endif
+
 // ============================================================================
 //  一、可自定义参数（改完重新编译即可，无需改动核心逻辑）
 //      所有尺寸均以 96 DPI 为基准像素，程序会自动按系统缩放比例放大。
@@ -158,6 +163,12 @@
 #define ANIM_ENTER_MS           360    // 启动入场动画时长
 #define ANIM_FRAME_MS           15     // 动画帧间隔（≈66fps）
 
+// ---------------------------- 触摸防误触 ------------------------------------
+// 开启后窗口不接收触摸、也不把触摸二次合成为鼠标点击，
+// 从根本上避免写字时打断白板笔划。代价是待机条只能用鼠标或托盘点开。
+#define TOUCH_GUARD_ON          1
+#define TOUCH_GUARD_OFF         0
+
 // ---------------------------- 系统集成 -------------------------------------
 #define AUTOSTART_VALUE_NAME    L"Win32RandomNamePicker"
 #define AUTO_CREATE_NAMES_TEMPLATE 1   // 1 = 缺少 names.txt 时自动生成示例
@@ -181,6 +192,7 @@
 #define IDM_SOUND       2004
 #define IDM_AUTOSTART   2005
 #define IDM_OPENSETTINGS 2006
+#define IDM_CLICKTHROUGH 2009
 #define IDM_ABOUT       2007
 #define IDM_EXIT        2008
 
@@ -195,6 +207,7 @@ struct Settings
     int  autostart;   // 1 = 开机自启
     int  dockY;       // 待机条 Y 坐标，-1 = 自动居中
     int  animMs;      // 弹出动画时长
+    int  touchGuard;  // 触摸防误触：1 = 开，0 = 关
 };
 
 struct CardLayout
@@ -249,7 +262,7 @@ static std::wstring              g_namesPath;
 static std::wstring              g_settingsPath;
 
 // 配置
-static Settings g_cfg = { 1, 70, 1, -1, ANIM_EXPAND_MS };
+static Settings g_cfg = { 1, 70, 1, -1, ANIM_EXPAND_MS, 1 };
 
 // 窗口状态
 static bool g_expanded     = false;
@@ -1101,6 +1114,9 @@ static void BeginExpandAnimation()
     g_dockHover = false;
     g_hoverT    = 0.0;
 
+    // 展开后需要能接收点击，先取消穿透
+
+
     RECT from = ComputeDockRect();
     RECT to   = ComputeCardRect();
 
@@ -1108,8 +1124,9 @@ static void BeginExpandAnimation()
               S(DOCK_HEIGHT) / 2, S(DOCK_HEIGHT) / 2,
               g_cfg.animMs, 90, 255);
 
-    SetForegroundWindow(g_hWnd);
-    SetFocus(g_hWnd);
+    // 不抢前台焦点：触摸屏上抢焦点会打断白板的手写状态
+    SetWindowPos(g_hWnd, HWND_TOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
 }
 
 static void BeginCollapseAnimation()
@@ -1152,6 +1169,10 @@ static void FinishCollapse()
                  SWP_NOACTIVATE | SWP_NOOWNERZORDER);
     SetDockRegion();
     StopAnimTimer();
+
+    // 回到待机：恢复点击穿透，不再干扰下层白板/画笔
+
+
     StartIdleTimer();
     RepaintNow();
 }
@@ -1712,6 +1733,10 @@ static std::string BuildSettingsText()
     wsprintfA(buf, "dock_y=%d\r\n", g_cfg.dockY);             out += buf;
     out += "; 弹出动画时长（毫秒），范围 80 ~ 1500\r\n";
     wsprintfA(buf, "anim_ms=%d\r\n", g_cfg.animMs);           out += buf;
+    out += "; 触摸屏防误触：1 = 开，0 = 关\r\n";
+    out += "; 开启后程序不接收触摸事件，也不会把触摸二次合成为鼠标点击，\r\n";
+    out += "; 在白板/希沃上写字时不会打断笔划。代价：待机条只能用鼠标或托盘打开\r\n";
+    wsprintfA(buf, "touch_guard=%d\r\n", g_cfg.touchGuard ? 1 : 0); out += buf;
 
     return out;
 }
@@ -1733,11 +1758,12 @@ static bool SaveSettings()
 
 static void LoadSettings()
 {
-    g_cfg.sound     = 1;
-    g_cfg.volume    = 70;
-    g_cfg.autostart = 1;
-    g_cfg.dockY     = -1;
-    g_cfg.animMs    = ANIM_EXPAND_MS;
+    g_cfg.sound        = 1;
+    g_cfg.volume       = 70;
+    g_cfg.autostart    = 1;
+    g_cfg.dockY        = -1;
+    g_cfg.animMs       = ANIM_EXPAND_MS;
+    g_cfg.touchGuard   = 1;
 
     std::string raw;
     if (!ReadAllBytes(g_settingsPath, raw) || raw.empty())
@@ -1775,6 +1801,8 @@ static void LoadSettings()
         else if (key == "autostart") g_cfg.autostart = (atoi(val.c_str()) != 0) ? 1 : 0;
         else if (key == "dock_y")    g_cfg.dockY     = atoi(val.c_str());
         else if (key == "anim_ms")   g_cfg.animMs    = ClampInt(atoi(val.c_str()), 80, 1500);
+        else if (key == "touch_guard")
+            g_cfg.touchGuard = (atoi(val.c_str()) != 0) ? 1 : 0;
     }
 }
 
@@ -2340,7 +2368,7 @@ static void OnLButtonDown(HWND hwnd, int x, int y)
         g_dockMoved    = false;
         GetCursorPos(&g_dragCursorStart);
         g_dockDragStartY = ComputeDockRect().top;
-        SetCapture(hwnd);
+        // 不调用 SetCapture：触摸屏上抢捕获会让白板丢失笔划
         RepaintNow();
         return;
     }
@@ -2357,7 +2385,6 @@ static void OnLButtonDown(HWND hwnd, int x, int y)
         if (!g_rolling)
         {
             g_buttonDown = true;
-            SetCapture(hwnd);
             RepaintNow();
         }
         return;
@@ -2368,7 +2395,6 @@ static void OnLButtonDown(HWND hwnd, int x, int y)
     g_cardMoved    = false;
     GetCursorPos(&g_dragCursorStart);
     GetWindowRect(hwnd, &g_dragWindowStart);
-    SetCapture(hwnd);
 }
 
 static void OnLButtonUp(HWND hwnd, int x, int y)
@@ -2457,6 +2483,8 @@ static void ShowContextMenu(HWND hwnd)
                 IDM_SOUND, L"音效");
     AppendMenuW(menu, MF_STRING | (g_cfg.autostart ? MF_CHECKED : MF_UNCHECKED),
                 IDM_AUTOSTART, L"开机自启");
+    AppendMenuW(menu, MF_STRING | (g_cfg.touchGuard ? MF_CHECKED : MF_UNCHECKED),
+                IDM_CLICKTHROUGH, L"触摸防误触（白板前台时穿透）");
     AppendMenuW(menu, MF_STRING, IDM_OPENSETTINGS, L"打开配置文件");
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(menu, MF_STRING, IDM_ABOUT, L"关于");
@@ -2529,6 +2557,21 @@ static void ShowContextMenu(HWND hwnd)
                     L"随机点名", MB_OK | MB_ICONINFORMATION);
         break;
 
+    case IDM_CLICKTHROUGH:
+        g_cfg.touchGuard = g_cfg.touchGuard ? 0 : 1;
+        SaveSettings();
+        MessageBoxW(NULL,
+                    g_cfg.touchGuard
+                        ? L"已开启触摸防误触。\n\n"
+                          L"程序不再接收触摸事件，也不会把触摸二次合成为鼠标点击，"
+                          L"因此在白板上写字时不会打断笔划。\n\n"
+                          L"注意：开启后待机椭圆只能用鼠标点，或直接用托盘图标操作。"
+                        : L"已关闭触摸防误触。\n\n"
+                          L"待机椭圆可以正常用手指点开，但在白板上写字时"
+                          L"可能出现「红笔变光标」。",
+                    L"随机点名", MB_OK | MB_ICONINFORMATION);
+        break;
+
     case IDM_OPENSETTINGS:
         ShellExecuteW(NULL, L"open", g_settingsPath.c_str(), NULL,
                       g_exeDir.c_str(), SW_SHOWNORMAL);
@@ -2536,7 +2579,7 @@ static void ShowContextMenu(HWND hwnd)
 
     case IDM_ABOUT:
         MessageBoxW(NULL,
-                    L"随机点名 v0.9.9\n\n"
+                    L"随机点名 v1.0.1\n\n"
                     L"纯 Win32 API 实现的桌面点名浮窗。\n"
                     L"左键点右侧椭圆展开，右键菜单可重新加载名单 / 开关音效 / 退出。\n\n"
                     L"配置文件：settings.ini\n名单文件：names.txt",
@@ -2590,11 +2633,55 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         OnLButtonUp(hwnd, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
         return 0;
 
+    // ------------------------------------------------------------------
+    //  触摸事件
+    //
+    //  「红笔变光标」的根因就在这里：Windows 收到 WM_TOUCH 后，如果窗口
+    //  没有自己处理，会再合成一次 WM_LBUTTONDOWN/UP。待机椭圆始终置顶，
+    //  手掌扫过屏幕右边缘时命中了它，这一笔就被浮窗吃掉，白板把它当成
+    //  一次点击 -> 工具退回光标。
+    //
+    //  处理：
+    //    · touch_guard=1（默认）：窗口不注册触摸，且把 WM_TOUCH 直接吞掉，
+    //      系统不会二次合成鼠标消息，触摸完全落到下层白板。
+    //    · touch_guard=0：交给 DefWindowProc，行为与普通窗口一致。
+    // ------------------------------------------------------------------
+    case WM_TOUCH:
+        if (g_cfg.touchGuard == TOUCH_GUARD_ON)
+        {
+            // 显式标记为已处理，阻止系统再合成鼠标消息
+            return 0;
+        }
+        break;
+
+    case WM_GESTURE:
+    case WM_GESTURENOTIFY:
+        if (g_cfg.touchGuard == TOUCH_GUARD_ON)
+            return 0;
+        break;
+
     case WM_MOUSELEAVE:
         g_trackingMouse = false;
         g_dockHover     = false;
         g_buttonHover   = false;
-            RepaintNow();
+        g_bodyHover     = false;
+
+        // 没有 SetCapture 时，鼠标移出窗口就收不到 WM_LBUTTONUP，
+        // 这里做兜底：把「按下未松开」的状态清掉，避免卡在半拖动。
+        if (g_dockDragging && g_dockMoved)
+        {
+            SaveDockPosition(ComputeDockRect().top);
+        }
+        if (g_dockDragging || g_cardDragging || g_buttonDown)
+        {
+            g_dockPressed  = false;
+            g_dockDragging = false;
+            g_dockMoved    = false;
+            g_cardDragging = false;
+            g_cardMoved    = false;
+            g_buttonDown   = false;
+        }
+        RepaintNow();
         return 0;
 
     case WM_CAPTURECHANGED:
